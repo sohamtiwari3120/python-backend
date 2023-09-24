@@ -3,9 +3,11 @@ import os
 import time
 import azure.cognitiveservices.speech as speechsdk
 import threading
-
+from datetime import datetime, timedelta
+time_starting = datetime.now()
 speaker_history = []
-speaker_history_f = open("speaker_history.txt", "w")
+speaker_last_spoken = {}
+speaker_history_f = open(f"speaker_history_{time_starting.strftime('%m-%d-%Y_%H:%M:%S')}.txt", "w")
 
 def conversation_transcriber_recognition_canceled_cb(evt: speechsdk.SessionEventArgs):
     print('Canceled event')
@@ -13,15 +15,25 @@ def conversation_transcriber_recognition_canceled_cb(evt: speechsdk.SessionEvent
 def conversation_transcriber_session_stopped_cb(evt: speechsdk.SessionEventArgs):
     print('SessionStopped event')
 
+def generate_current_dotnet_datetime_ticks(base_time = datetime(1, 1, 1)):
+    x=datetime.utcnow()
+    return x, (x - base_time)/timedelta(microseconds=1) * 1e1
+
 def conversation_transcriber_transcribed_cb(evt: speechsdk.SpeechRecognitionEventArgs):
     print('TRANSCRIBED:')
     if evt.result.reason == speechsdk.ResultReason.RecognizedSpeech:
         text = evt.result.text
         speaker_id = evt.result.speaker_id
+        duration = evt.result.duration
+        utc_time_arrived, ticks_time_arrived = generate_current_dotnet_datetime_ticks()
         print('\tText={}'.format(text))
         print('\tSpeaker ID={}'.format(speaker_id))
-        speaker_history.append((speaker_id, text, "11:55am"))
-        speaker_history_f.write(f"{speaker_id}, {text}, 11:55 am\n")
+        temp = {
+            speaker_id:"speaker_id", text:"text", duration:"duration", utc_time_arrived:"utc_time_arrived", ticks_time_arrived:"ticks_time_arrived"
+        }
+        speaker_last_spoken[speaker_id] = utc_time_arrived
+        speaker_history.append(temp)
+        speaker_history_f.write(f"{speaker_id}|{text}|{duration}|{utc_time_arrived}|{ticks_time_arrived}\n")
         speaker_history_f.flush()
     elif evt.result.reason == speechsdk.ResultReason.NoMatch:
         print('\tNOMATCH: Speech could not be TRANSCRIBED: {}'.format(evt.result.no_match_details))
@@ -103,6 +115,9 @@ def diarize_from_stream(topic: str, psi_port:int):
     push_stream_writer_thread = threading.Thread(target=push_stream_writer, args=[stream, topic, psi_port])
     push_stream_writer_thread.start()
 
+    check_every_second_for_silent_thread = threading.Thread(target=check_every_second_for_silent)
+    check_every_second_for_silent_thread.start()
+
     # start continuous speech recognition
     conversation_transcriber.start_transcribing_async()
 
@@ -118,6 +133,7 @@ def diarize_from_stream(topic: str, psi_port:int):
 
     conversation_transcriber.stop_transcribing_async()
     push_stream_writer_thread.join()
+    check_every_second_for_silent_thread.join()
 
 # ZMQ UTILS
 def create_sub_socket(ip_address:str=''):
@@ -132,6 +148,18 @@ def readFrame(socket):
     frame = message[b"message"]
     originatingTime = message[b"originatingTime"]
     return (frame, originatingTime)
+
+def check_every_second_for_silent(delta_silence=timedelta(seconds=10)):
+    while True:
+        silent_speakers = []
+        time_now = datetime.utcnow()
+        for speaker, last_time_spoken in speaker_last_spoken.items():
+            delta = (time_now - last_time_spoken)
+            print(delta, delta_silence, delta > delta_silence)
+            if delta  > delta_silence:
+                silent_speakers.append(speaker)
+        print(f"Speakers silent at {time_now}: {silent_speakers}")
+        time.sleep(1)
 
 def push_stream_writer(stream, topic:str, psi_port=30003):
     # The number of bytes to push per buffer
@@ -153,46 +181,6 @@ def push_stream_writer(stream, topic:str, psi_port=30003):
         sub_socket_to_psi.close()
         stream.close()  # must be done to signal the end of stream
 
-def speech_recognition_with_push_stream(topic: str, psi_port:int):
-    """gives an example how to use a push audio stream to recognize speech from a custom audio
-    source"""
-    AzureSubscriptionKey = "165ea78f5c7f44bd9d31f07d0f319cc7"
-    AzureRegion = "eastus"
-    speech_config = speechsdk.SpeechConfig(subscription=AzureSubscriptionKey, region=AzureRegion)
-
-    # setup the audio stream
-    stream = speechsdk.audio.PushAudioInputStream()
-    audio_config = speechsdk.audio.AudioConfig(stream=stream)
-
-    # instantiate the speech recognizer with push stream input
-    speech_recognizer = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config)
-    recognition_done = threading.Event()
-
-    # Connect callbacks to the events fired by the speech recognizer
-    def session_stopped_cb(evt):
-        """callback that signals to stop continuous recognition upon receiving an event `evt`"""
-        print('SESSION STOPPED: {}'.format(evt))
-        recognition_done.set()
-
-    speech_recognizer.recognizing.connect(lambda evt: print('RECOGNIZING: {}'.format(evt)))
-    speech_recognizer.recognized.connect(lambda evt: print('RECOGNIZED: {}'.format(evt)))
-    speech_recognizer.session_started.connect(lambda evt: print('SESSION STARTED: {}'.format(evt)))
-    speech_recognizer.session_stopped.connect(session_stopped_cb)
-    speech_recognizer.canceled.connect(lambda evt: print('CANCELED {}'.format(evt)))
-
-    # start push stream writer thread
-    push_stream_writer_thread = threading.Thread(target=push_stream_writer, args=[stream, topic, psi_port])
-    push_stream_writer_thread.start()
-
-    # start continuous speech recognition
-    speech_recognizer.start_continuous_recognition()
-
-    # wait until all input processed
-    recognition_done.wait()
-
-    # stop recognition and clean up
-    speech_recognizer.stop_continuous_recognition()
-    push_stream_writer_thread.join()
 
 def receive_audio_from_psi(topic:str, psi_port=30003):
     sub_socket_to_psi = create_sub_socket(ip_address=f"tcp://localhost:{psi_port}")
@@ -210,7 +198,7 @@ def receive_audio_from_psi(topic:str, psi_port=30003):
                 # topic, frames = message.split()
                 # frames = wav_fh.readframes(n_bytes // 2)
                 f.writeframes(frames)
-                # print('read {} bytes'.format(len(frames)))
+                print('read {} bytes {}'.format(len(frames), originatingTime))
                 if not frames:
                     break
                 # time.sleep(.1)
@@ -221,7 +209,7 @@ def receive_audio_from_psi(topic:str, psi_port=30003):
 if __name__ == "__main__":
     try:
         diarize_from_stream(topic=f"audio-psi-to-python", psi_port=30003)
-        # speech_recognition_with_push_stream(topic=f"audio-psi-to-python", psi_port=30003)
+        # receive_audio_from_psi(topic=f"audio-psi-to-python", psi_port=30003)
         # recognize_from_file()
     except Exception as err:
         print("Encountered exception. {}".format(err))
