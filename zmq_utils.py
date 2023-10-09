@@ -7,6 +7,9 @@ import zmq, datetime, msgpack, time, json
 def generate_current_dotnet_datetime_ticks(base_time = datetime.datetime(1, 1, 1)):
     return (datetime.datetime.utcnow() - base_time)/datetime.timedelta(microseconds=1) * 1e1
 
+def convert_ticks_to_timestamp(inp_ticks, base_time = datetime.datetime(1, 1, 1)):
+    return inp_ticks / 1e1 * datetime.timedelta(microseconds=1) + base_time
+
 def send_payload(pub_sock, topic, message, originatingTime=None):
     payload = {}
     payload[u"message"] = message

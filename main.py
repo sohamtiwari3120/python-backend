@@ -15,6 +15,14 @@ import threading
 from datetime import datetime, timedelta
 from typing import List, Dict
 import re
+import numpy as np
+from dotenv import dotenv_values
+
+config = dotenv_values(".env")
+
+import sys
+sys.path.append("/usr0/home/sohamdit/Jetson/video_scripts/")
+# import send_video_dict_with_embed
 
 # User Initiated
 user_invocation_string = "hey rachel"
@@ -28,11 +36,11 @@ Conversation:
 AI:```
 """
 chatgpt_last_response_time = datetime.utcnow()
-chatgpt_response_interval = timedelta(seconds=30)
+chatgpt_response_interval = timedelta(seconds=60)
 PROMPT = PromptTemplate(
   template=prompt_template, input_variables=["question", "conversation"]
 )
-OPENAI_KEY = "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"
+OPENAI_KEY = config["OPENAI_KEY"]
 MODEL_NAME = "gpt-3.5-turbo"
 LLM_BIG = ChatOpenAI(model_name=MODEL_NAME, openai_api_key=OPENAI_KEY, temperature=0)
 CHAIN = LLMChain(llm=LLM_BIG, prompt=PROMPT, verbose=False)
@@ -51,24 +59,44 @@ speaker_last_spoken = {}
 speaker_history_f = open(f"speaker_history_{time_starting.strftime('%m-%d-%Y_%H:%M:%S')}.txt", "w")
 silent_speakers = []
 
+
+
+# CHATGPT FLAGS
+FLAG_CV_PRED = False
+FLAG_USER_INVOK = False
+FLAG_SILENCE_DET = False
+
+# TTS Invocaton
+tts_invoked_last = datetime.now() - timedelta(hours=1)
+tts_invoked_waiting_for_new_spk_id = False
+
 def invoke_chatgpt(override_time_check=False):
-    print(f"Invoking chatgpt")
-    global chatgpt_currently_invoked, chatgpt_last_response_time, speaker_history
+    time_now = datetime.utcnow()
+    global chatgpt_currently_invoked, chatgpt_last_response_time, speaker_history, FLAG_SILENCE_DET, FLAG_USER_INVOK, FLAG_CV_PRED
+    FLAG_CV_PRED = False
+    FLAG_USER_INVOK = False
+    FLAG_SILENCE_DET = False
+    print(f"Function called.")
+    if not override_time_check and (time_now - chatgpt_last_response_time) < chatgpt_response_interval:
+        print(f"Wait for atleast {chatgpt_response_interval - (time_now - chatgpt_last_response_time)} before invoking again.")
+        return
     if chatgpt_currently_invoked:
         print(f"One invocation of ChatGPT already running.")
         return 
+    print(f"Invoking chatgpt")
+    utc_time_arrived, ticks_time_arrived = generate_current_dotnet_datetime_ticks()
+    chatgpt_last_response_time = utc_time_arrived
     chatgpt_currently_invoked = True
     conversation_string = ""
     for utterance in speaker_history:
-        conversation_string += f"[{utterance['utc_time_arrived']}] {utterance['speaker_id']}: {utterance['text']}\n"
+        conversation_string += f"{utterance['speaker_id']}: {utterance['text']}\n"
     question = f""
     print("\t\t" + f"{conversation_string}")
     print("\t\t" + f"{question}")
     response = get_response(conversation=conversation_string, question=question)
-    utc_time_arrived, ticks_time_arrived = generate_current_dotnet_datetime_ticks()
-    chatgpt_last_response_time = utc_time_arrived
+    
     speaker_history.append({
-        "speaker_id":"ChatGPT", "text":response, "duration":None, "utc_time_arrived":utc_time_arrived, "ticks_time_arrived":ticks_time_arrived
+        "speaker_id":"Rachel", "text":response, "duration":None, "utc_time_arrived":utc_time_arrived, "ticks_time_arrived":ticks_time_arrived
     })
     send_payload(chatgpt_resp_pub_socket, "chatgpt-responses", response)
     chatgpt_currently_invoked = False
@@ -86,6 +114,7 @@ def generate_current_dotnet_datetime_ticks(base_time = datetime(1, 1, 1)):
     return x, (x - base_time)/timedelta(microseconds=1) * 1e1
 
 def conversation_transcriber_transcribed_cb(evt: speechsdk.SpeechRecognitionEventArgs):
+    global tts_invoked_waiting_for_new_spk_id
     print('TRANSCRIBED:')
     if evt.result.reason == speechsdk.ResultReason.RecognizedSpeech:
         text = evt.result.text
@@ -97,13 +126,30 @@ def conversation_transcriber_transcribed_cb(evt: speechsdk.SpeechRecognitionEven
         temp = {
             "speaker_id":speaker_id, "text":text, "duration":duration, "utc_time_arrived":utc_time_arrived, "ticks_time_arrived":ticks_time_arrived
         }
+
+        if speaker_id == "Guest-1":
+            # this is probably rachel due to her long intro sentence
+            print(f"Not adding {speaker_id}'s last text, its probably Rachel.")
+            return
+        
         if speaker_id != "Unknown":
             speaker_last_spoken[speaker_id] = utc_time_arrived
+
+        # print(f"line 131 ", tts_invoked_waiting_for_new_spk_id)
+        # if tts_invoked_waiting_for_new_spk_id:
+        #     if speaker_id not in speaker_last_spoken:
+        #         # new speaker id probably rachel
+        #         tts_invoked_waiting_for_new_spk_id = False
+        #         print(f"Not appending text from spker id: {speaker_id} to history")
+        #         return
+        print(speaker_history[-3:])
         speaker_history.append(temp)
         speaker_history_f.write(f"{speaker_id}|{text}|{duration}|{utc_time_arrived}|{ticks_time_arrived}\n")
         speaker_history_f.flush()
         if user_invocation_string in re.sub(r'[^\w\s]', '', text.lower()):
-            invoke_chatgpt()
+            # invoke_chatgpt()
+            global FLAG_USER_INVOK
+            FLAG_USER_INVOK = True
     elif evt.result.reason == speechsdk.ResultReason.NoMatch:
         print('\tNOMATCH: Speech could not be TRANSCRIBED: {}'.format(evt.result.no_match_details))
 
@@ -171,7 +217,7 @@ def diarize_from_stream(topic: str, psi_port:int):
     check_every_second_for_silent_thread.join()
     print(f"TERMINATED Check every second for silence thread")
 
-def check_every_second_for_silent(delta_silence=timedelta(seconds=60)):
+def check_every_second_for_silent(delta_silence=timedelta(seconds=30)):
     global silent_speakers
     while True:
         silent_speakers = []
@@ -182,8 +228,10 @@ def check_every_second_for_silent(delta_silence=timedelta(seconds=60)):
             if delta  > delta_silence:
                 silent_speakers.append(speaker)
         print(f"Speakers silent at {time_now}: {silent_speakers}")
-        if len(silent_speakers) > 0 and (time_now - chatgpt_last_response_time) > chatgpt_response_interval:
-            invoke_chatgpt()
+        if len(silent_speakers) > 0:
+            # invoke_chatgpt()
+            global FLAG_SILENCE_DET
+            FLAG_SILENCE_DET = True
         time.sleep(1)
 
 def push_stream_writer(stream, topic:str, psi_port=40003):
@@ -206,6 +254,57 @@ def push_stream_writer(stream, topic:str, psi_port=40003):
         sub_socket_to_psi.close()
         stream.close()  # must be done to signal the end of stream
 
+def monitor_flags_and_invoke_chatgpt():
+    global FLAG_SILENCE_DET, FLAG_USER_INVOK, FLAG_CV_PRED, chatgpt_currently_invoked
+    while True:
+        if FLAG_SILENCE_DET or FLAG_USER_INVOK or FLAG_CV_PRED:
+            try:
+                invoke_chatgpt(override_time_check=FLAG_USER_INVOK)
+            except Exception as e:
+                FLAG_SILENCE_DET = False
+                FLAG_USER_INVOK = False
+                FLAG_CV_PRED = False
+                chatgpt_currently_invoked = False
+                print(e)
+        time.sleep(1)
+
+def receive_cv_preds_from_psi(topic:str, psi_port=40003):
+    sub_socket_to_psi = create_sub_socket(ip_address=f"tcp://localhost:{psi_port}")
+    sub_socket_to_psi.setsockopt_string(zmq.SUBSCRIBE, topic)
+    confused_column = 3
+    confusion_threshold = 0.5
+    try:
+        while True:
+            frames, originatingTime = readFrame(sub_socket_to_psi)
+            emotions = np.frombuffer(frames).reshape(-1, 5)
+            for person in range(emotions.shape[0]):
+                max_emotion_ind = np.argmax(emotions[person])
+                if max_emotion_ind != confused_column:
+                    continue
+                max_emotion_val = emotions[person][max_emotion_ind]
+                if max_emotion_val > confusion_threshold:
+                    global FLAG_CV_PRED
+                    FLAG_CV_PRED = True
+                    print(f"Person {person} is confused using cv model.")
+                    break
+    finally:
+        sub_socket_to_psi.close()
+
+def receive_tts_inv_from_psi(topic:str, psi_port=40006):
+    sub_socket_to_psi = create_sub_socket(ip_address=f"tcp://localhost:{psi_port}")
+    sub_socket_to_psi.setsockopt_string(zmq.SUBSCRIBE, topic)
+    global tts_invoked_last, tts_invoked_waiting_for_new_spk_id
+    try:
+        while True:
+            print(f"waiting from fe/python")
+            frames, originatingTime = readFrame(sub_socket_to_psi)
+            tts_invoked = json.loads(frames)['tts_invoked']
+            print(f"received from fe", frames, tts_invoked)
+            if tts_invoked:
+                tts_invoked_last = convert_ticks_to_timestamp(originatingTime)
+                tts_invoked_waiting_for_new_spk_id = True
+    finally:
+        sub_socket_to_psi.close()
 
 def receive_audio_from_psi(topic:str, psi_port=40003):
     sub_socket_to_psi = create_sub_socket(ip_address=f"tcp://localhost:{psi_port}")
@@ -233,6 +332,21 @@ def receive_audio_from_psi(topic:str, psi_port=40003):
 # Main
 if __name__ == "__main__":
     try:
+        receive_cv_preds_thread = threading.Thread(target=receive_cv_preds_from_psi, args=["cv-preds-psi-to-python", 40005])
+        receive_cv_preds_thread.start()
+
+        receive_tts_inv_thread = threading.Thread(target=receive_tts_inv_from_psi, args=["tts-inv-psi-to-python", 40006])
+        receive_tts_inv_thread.start()
+
+        check_flags_and_invoke_thread = threading.Thread(target=monitor_flags_and_invoke_chatgpt)
+        check_flags_and_invoke_thread.start()
+
         diarize_from_stream(topic=f"audio-psi-to-python", psi_port=40003)
+        print(f"Started diarization service")
+        
+        receive_cv_preds_thread.join()
+        receive_tts_inv_thread.join()
+        check_flags_and_invoke_thread.join()
+        # send_video_dict_with_embed.main()
     except Exception as err:
         print("Encountered exception. {}".format(err))
