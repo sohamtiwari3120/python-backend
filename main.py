@@ -28,7 +28,7 @@ sys.path.append("/usr0/home/sohamdit/Jetson/video_scripts/")
 user_invocation_string = "hey rachel"
 
 # CHATGPT LANGCHAIN CONFIG
-prompt_template = """You are Rachel, an AI Teaching Assistant. You are given conversation between students who are working on solving a problem. If no explicit question asked of you, then infer the question worked on from the conversation.  Then, give the students a hint to help them solve the question. They have been silent and thinking for a while now, but did not make any progress. Do not state the answer explicitly. Keep the hint subtle. The students should be able to solve the question on their own after getting the hint. Give an example if possible. If they get the answer, congratulate and confirm the same. 
+prompt_template = """Imagine you are Rachel, an AI Teaching Assistant. You are given conversation between students who are working on solving a problem. If no explicit question asked of you, then infer the question worked on from the conversation.  Then, give the students a hint to help them solve the question. They have been silent and thinking for a while now, but did not make any progress. Do not state the answer explicitly. Keep the hint subtle. The students should be able to solve the question on their own after getting the hint. Give an example if possible. If they get the answer, congratulate and confirm the same. 
 Question:
 ```{question}```
 Conversation:
@@ -42,8 +42,8 @@ PROMPT = PromptTemplate(
 )
 OPENAI_KEY = config["OPENAI_KEY"]
 MODEL_NAME = "gpt-3.5-turbo"
-LLM_BIG = ChatOpenAI(model_name=MODEL_NAME, openai_api_key=OPENAI_KEY, temperature=0)
-CHAIN = LLMChain(llm=LLM_BIG, prompt=PROMPT, verbose=False)
+LLM_BIG = ChatOpenAI(model_name=MODEL_NAME, openai_api_key=OPENAI_KEY, temperature=0.8)
+CHAIN = LLMChain(llm=LLM_BIG, prompt=PROMPT, verbose=True)
 chatgpt_currently_invoked = False
 
 def get_response(conversation, question):
@@ -217,7 +217,7 @@ def diarize_from_stream(topic: str, psi_port:int):
     check_every_second_for_silent_thread.join()
     print(f"TERMINATED Check every second for silence thread")
 
-def check_every_second_for_silent(delta_silence=timedelta(seconds=30)):
+def check_every_second_for_silent(delta_silence=timedelta(seconds=20)):
     global silent_speakers
     while True:
         silent_speakers = []
@@ -272,7 +272,7 @@ def receive_cv_preds_from_psi(topic:str, psi_port=40003):
     sub_socket_to_psi = create_sub_socket(ip_address=f"tcp://localhost:{psi_port}")
     sub_socket_to_psi.setsockopt_string(zmq.SUBSCRIBE, topic)
     confused_column = 3
-    confusion_threshold = 0.5
+    confusion_threshold = 0.85
     try:
         while True:
             frames, originatingTime = readFrame(sub_socket_to_psi)
