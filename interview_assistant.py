@@ -122,7 +122,7 @@ class InterviewAssistant:
         ]
         ai_response = self.chat.with_config(
             configurable={"max_tokens": max_tokens}
-        ).invoke(messages)
+        ).invoke(messages, stop=self.stop_words)
         return ai_response.content
 
     def determine_mode(self, code, transcript):
@@ -154,7 +154,7 @@ class InterviewAssistant:
             configurable={
                 "max_tokens": self.max_token_args["direct_question_response_max"]
             }
-        ).invoke(messages)
+        ).invoke(messages, stop=self.stop_words)
         return ai_response.content
 
     def check_hint(self, hint, true_ans) -> bool:
