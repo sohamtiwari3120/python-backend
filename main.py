@@ -9,7 +9,6 @@ from langchain import LLMChain
 from langchain.prompts import PromptTemplate
 from langchain.chat_models import ChatOpenAI
 import zmq
-import msgpack
 import time
 import wave
 from zmq_utils import *
@@ -33,6 +32,9 @@ user_invocation_string = "hey rachel"
 # CHATGPT LANGCHAIN CONFIG
 chatgpt_currently_invoked = False
 curr_chatgpt_mode = 0
+# asked if help needed
+asked_if_help_needed = False
+help_needed = False
 
 chatgpt_prompt_templates = {
     "question_detection": 
@@ -58,7 +60,7 @@ chatgpt_prompt_templates = {
         """,
     "followup_questions":
         """
-            Imagine you are Rachel, an AI Teaching Assistant. You are given conversation between students who are working on solving a problem. You have already detected the question they are stuck on.  You have also determined the breakdown of concepts needed to know to solve the question. The hint you provided previously did not seem to have helped. You know the question they are working on, and the step-by-step the concepts they should know to help arrive at an answer. Generate a list of follow-up questions for each of the topics from the breakdown to evaluate the students' understanding of the concepts.
+            Imagine you are Rachel, an AI Teaching Assistant. You are given conversation between students who are working on solving a problem. You have already detected the question they are stuck on.  You have also determined the breakdown of concepts needed to know to solve the question. The hint you provided previously did not seem to have helped. You know the question they are working on, and the step-by-step the concepts they should know to help arrive at an answer. Generate a follow-up question for each of the topics from the breakdown to evaluate the students' understanding of the concepts.
 
             For example:
             Rachel: Seems you are struggling to find out how much does light coming in at 20 degrees bend from air to water?
@@ -103,7 +105,7 @@ chatgpt_resp_pub_socket = create_socket(ip_address='tcp://*:50001')
 
 # SPEAKER DIARIZATION
 time_starting = datetime.now()
-speaker_history = []
+speaker_history: List[Dict[str, str]] = []
 speaker_last_spoken = {}
 speaker_history_f = open(
     f"speaker_history_{time_starting.strftime('%m-%d-%Y_%H:%M:%S')}.txt", "w")
@@ -113,6 +115,8 @@ silent_speakers = []
 # CHATGPT FLAGS
 FLAG_CV_PRED = False
 FLAG_USER_INVOK = False
+FLAG_USER_INVOK_TIME = None
+FLAG_USER_INVOK_TIME_DELTA = timedelta(seconds=5)
 FLAG_SILENCE_DET = False
 
 # TTS Invocaton
@@ -125,10 +129,8 @@ def get_next_chatgpt_mode(curr_chatgpt_mode: int) -> int:
 
 def invoke_chatgpt(override_time_check=False):
     time_now = datetime.utcnow()
-    global chatgpt_currently_invoked, chatgpt_last_response_time, speaker_history, FLAG_SILENCE_DET, FLAG_USER_INVOK, FLAG_CV_PRED, curr_chatgpt_mode, chatgpt_modes
-    FLAG_CV_PRED = False
-    FLAG_USER_INVOK = False
-    FLAG_SILENCE_DET = False
+    global chatgpt_currently_invoked, chatgpt_last_response_time, speaker_history, FLAG_SILENCE_DET, FLAG_USER_INVOK, FLAG_USER_INVOK_TIME, FLAG_CV_PRED, curr_chatgpt_mode, chatgpt_modes, asked_if_help_needed, help_needed
+    response = ""
     print(f"Function called.")
     if not override_time_check and (time_now - chatgpt_last_response_time) < chatgpt_response_interval:
         print(f"Wait for atleast {chatgpt_response_interval - (time_now - chatgpt_last_response_time)} before invoking again.")
@@ -136,28 +138,63 @@ def invoke_chatgpt(override_time_check=False):
     if chatgpt_currently_invoked:
         print(f"One invocation of ChatGPT already running.")
         return
-    print(f"Invoking chatgpt, mode = {chatgpt_modes[curr_chatgpt_mode]}")
-    utc_time_arrived, ticks_time_arrived = generate_current_dotnet_datetime_ticks()
-    chatgpt_last_response_time = utc_time_arrived
-    chatgpt_currently_invoked = True
-    conversation_string = ""
-    for utterance in speaker_history:
-        conversation_string += f"{utterance['speaker_id']}: {utterance['text']}\n"
-    response = get_response(input_text=conversation_string, mode=chatgpt_modes[curr_chatgpt_mode])
-    problem_state_dict[chatgpt_modes[curr_chatgpt_mode]] = response
-    print(f"""
-        Curr chatgpt mode: {chatgpt_modes[curr_chatgpt_mode]}\n
-        Curr problem state dict: {problem_state_dict}
+    
+    FLAG_USER_INVOK_DO = (FLAG_USER_INVOK and (time_now - FLAG_USER_INVOK_TIME > FLAG_USER_INVOK_TIME_DELTA))
 
-        Next chatgpt mode: {chatgpt_modes[get_next_chatgpt_mode(curr_chatgpt_mode)]}
-    """)
-    curr_chatgpt_mode = get_next_chatgpt_mode(curr_chatgpt_mode) # will cycle through chatgpt modes
-    speaker_history.append({
-        "speaker_id": "Rachel", "text": response, "duration": None, "utc_time_arrived": utc_time_arrived, "ticks_time_arrived": ticks_time_arrived
-    })
-    send_payload(chatgpt_resp_pub_socket, "chatgpt-responses", response)
-    chatgpt_currently_invoked = False
-    print(f"Chatgpt: {response}")
+    if not FLAG_USER_INVOK and not asked_if_help_needed:
+        # first ask user if help is needed
+        response = "Do you need help?"
+        asked_if_help_needed = True
+    else:
+        # user has been asked, now check for response, and disable all invok flags
+
+        print("line 150", FLAG_USER_INVOK, time_now - FLAG_USER_INVOK_TIME)
+        help_needed = False
+        if FLAG_USER_INVOK_DO or "yes" in speaker_history[-1]["text"].lower():
+            help_needed = True
+
+        if help_needed:
+            local_curr_chatgpt_mode = curr_chatgpt_mode if not FLAG_USER_INVOK else 0
+            
+            print(f"Invoking chatgpt, mode = {chatgpt_modes[local_curr_chatgpt_mode]}")
+            utc_time_arrived, ticks_time_arrived = generate_current_dotnet_datetime_ticks()
+            chatgpt_last_response_time = utc_time_arrived
+            chatgpt_currently_invoked = True
+
+
+            conversation_string = ""
+            for utterance in speaker_history:
+                conversation_string += f"{utterance['speaker_id']}: {utterance['text']}\n"
+            response = get_response(input_text=conversation_string, mode=chatgpt_modes[local_curr_chatgpt_mode])
+            if not FLAG_USER_INVOK:
+                problem_state_dict[chatgpt_modes[curr_chatgpt_mode]] = response
+            else:
+                problem_state_dict["direct_user_invok"] = response
+            print(f"""
+                Curr chatgpt mode: {chatgpt_modes[local_curr_chatgpt_mode]}\n
+                Curr problem state dict: {problem_state_dict}
+
+                Next chatgpt mode: {chatgpt_modes[get_next_chatgpt_mode(curr_chatgpt_mode)]}
+            """)
+            if not FLAG_USER_INVOK:
+                curr_chatgpt_mode = get_next_chatgpt_mode(curr_chatgpt_mode) # will cycle through chatgpt modes
+            speaker_history.append({
+                "speaker_id": "Rachel", "text": response, "duration": None, "utc_time_arrived": utc_time_arrived, "ticks_time_arrived": ticks_time_arrived
+            })
+            chatgpt_currently_invoked = False
+        else:
+            response = ""
+        
+        FLAG_CV_PRED = False
+        if FLAG_USER_INVOK_DO:
+            FLAG_USER_INVOK = False
+            FLAG_USER_INVOK_TIME = None
+        FLAG_SILENCE_DET = False
+        asked_if_help_needed = False
+
+    if len(response) > 0:
+        send_payload(chatgpt_resp_pub_socket, "chatgpt-responses", response)
+        print(f"Chatgpt: {response}")
     print(f"."*100)
 
 
@@ -175,7 +212,7 @@ def generate_current_dotnet_datetime_ticks(base_time=datetime(1, 1, 1)):
 
 
 def conversation_transcriber_transcribed_cb(evt: speechsdk.SpeechRecognitionEventArgs):
-    global tts_invoked_waiting_for_new_spk_id
+    global tts_invoked_waiting_for_new_spk_id, FLAG_USER_INVOK
     print('TRANSCRIBED:')
     if evt.result.reason == speechsdk.ResultReason.RecognizedSpeech:
         text = evt.result.text
@@ -209,9 +246,10 @@ def conversation_transcriber_transcribed_cb(evt: speechsdk.SpeechRecognitionEven
             f"{speaker_id}|{text}|{duration}|{utc_time_arrived}|{ticks_time_arrived}\n")
         speaker_history_f.flush()
         if user_invocation_string in re.sub(r'[^\w\s]', '', text.lower()):
-            # invoke_chatgpt()
-            global FLAG_USER_INVOK
+            global FLAG_USER_INVOK, FLAG_USER_INVOK_TIME
             FLAG_USER_INVOK = True
+            FLAG_USER_INVOK_TIME = datetime.utcnow()
+            print(f"Rachel invoked", FLAG_USER_INVOK, FLAG_USER_INVOK_TIME)
     elif evt.result.reason == speechsdk.ResultReason.NoMatch:
         print('\tNOMATCH: Speech could not be TRANSCRIBED: {}'.format(
             evt.result.no_match_details))
@@ -304,7 +342,6 @@ def check_every_second_for_silent(delta_silence=timedelta(seconds=20)):
                 silent_speakers.append(speaker)
         print(f"Speakers silent at {time_now}: {silent_speakers}")
         if len(silent_speakers) > 0:
-            # invoke_chatgpt()
             global FLAG_SILENCE_DET
             FLAG_SILENCE_DET = True
         time.sleep(1)
@@ -333,7 +370,7 @@ def push_stream_writer(stream, topic: str, psi_port=40003):
 
 
 def monitor_flags_and_invoke_chatgpt():
-    global FLAG_SILENCE_DET, FLAG_USER_INVOK, FLAG_CV_PRED, chatgpt_currently_invoked
+    global FLAG_SILENCE_DET, FLAG_USER_INVOK, FLAG_USER_INVOK_TIME, FLAG_CV_PRED, chatgpt_currently_invoked
     while True:
         if FLAG_SILENCE_DET or FLAG_USER_INVOK or FLAG_CV_PRED:
             try:
@@ -341,6 +378,7 @@ def monitor_flags_and_invoke_chatgpt():
             except Exception as e:
                 FLAG_SILENCE_DET = False
                 FLAG_USER_INVOK = False
+                FLAG_USER_INVOK_TIME = None
                 FLAG_CV_PRED = False
                 chatgpt_currently_invoked = False
                 print(e)
@@ -380,11 +418,25 @@ def receive_tts_inv_from_psi(topic: str, psi_port=40006):
         while True:
             print(f"waiting from fe/python")
             frames, originatingTime = readFrame(sub_socket_to_psi)
-            tts_invoked = json.loads(frames)['tts_invoked']
-            print(f"received from fe", frames, tts_invoked)
-            if tts_invoked:
-                tts_invoked_last = convert_ticks_to_timestamp(originatingTime)
-                tts_invoked_waiting_for_new_spk_id = True
+            if topic == "tts-inv-psi-to-python":
+                tts_invoked = json.loads(frames)['tts_invoked']
+                print(f"received from fe", frames, tts_invoked)
+                if tts_invoked:
+                    tts_invoked_last = convert_ticks_to_timestamp(originatingTime)
+                    tts_invoked_waiting_for_new_spk_id = True
+    finally:
+        sub_socket_to_psi.close()
+
+def receive_code_from_psi(topic: str, psi_port=40006):
+    sub_socket_to_psi = create_sub_socket(
+        ip_address=f"tcp://localhost:{psi_port}")
+    sub_socket_to_psi.setsockopt_string(zmq.SUBSCRIBE, topic)
+    # global tts_invoked_last, tts_invoked_waiting_for_new_spk_id
+    try:
+        while True:
+            print(f"waiting for code from fe/python")
+            frames, originatingTime = readFrame(sub_socket_to_psi)
+            print(f"received code from fe", frames)
     finally:
         sub_socket_to_psi.close()
 
@@ -425,6 +477,10 @@ if __name__ == "__main__":
             target=receive_tts_inv_from_psi, args=["tts-inv-psi-to-python", 40006])
         receive_tts_inv_thread.start()
 
+        receive_code_thread = threading.Thread(
+            target=receive_code_from_psi, args=["fe-code-psi-to-python", 40007])
+        receive_code_thread.start()
+
         check_flags_and_invoke_thread = threading.Thread(
             target=monitor_flags_and_invoke_chatgpt)
         check_flags_and_invoke_thread.start()
@@ -434,7 +490,9 @@ if __name__ == "__main__":
 
         receive_cv_preds_thread.join()
         receive_tts_inv_thread.join()
+        receive_code_thread.join()
         check_flags_and_invoke_thread.join()
+        
         # send_video_dict_with_embed.main()
     except Exception as err:
         print("Encountered exception. {}".format(err))
