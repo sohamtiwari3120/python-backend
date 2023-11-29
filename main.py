@@ -5,9 +5,12 @@ VOTING SYSTEM
 
 
 import sys
+from typing import Optional
+import json
 from langchain import LLMChain
 from langchain.prompts import PromptTemplate
 from langchain.chat_models import ChatOpenAI
+from interview_assistant import InterviewAssistant
 import zmq
 import time
 import wave
@@ -31,51 +34,9 @@ user_invocation_string = "hey rachel"
 
 # CHATGPT LANGCHAIN CONFIG
 chatgpt_currently_invoked = False
-curr_chatgpt_mode = 0
 # asked if help needed
 asked_if_help_needed = False
 help_needed = False
-
-chatgpt_prompt_templates = {
-    "question_detection": 
-        """
-            Imagine you are Rachel, an AI Teaching Assistant. You are given conversation between students who are working on solving a problem. If no explicit question asked of you, then infer the question worked on from the conversation.  Then, give the students a hint to help them solve the question. They have been silent and thinking for a while now, but did not make any progress. Do not state the answer explicitly. Keep the hint subtle. The students should be able to solve the question on their own after getting the hint. Give an example if possible. If they get the answer, congratulate and confirm the same. 
-
-            Conversation:
-            ```{input_text}```
-            Rachel:
-        """
-    ,
-    "concept_generation": 
-        """
-            Imagine you are Rachel, an AI Teaching Assistant. You are given conversation between students who are working on solving a problem. You have already detected the question they are stuck on.  The hint you provided previously did not seem to have helped. So given the question they are working on, generate step-by-step the concepts they should know to help arrive at an answer. 
-
-            For example:
-            Rachel: Seems you are struggling to find out how much does light coming in at 20 degrees bend from air to water?
-            Concepts: Physics ->  Ray Optics -> Refraction -> Refractive Index -> Snell's Law 
-
-            Conversation:
-            ```{input_text}```
-            Concepts: 
-        """,
-    "followup_questions":
-        """
-            Imagine you are Rachel, an AI Teaching Assistant. You are given conversation between students who are working on solving a problem. You have already detected the question they are stuck on.  You have also determined the breakdown of concepts needed to know to solve the question. The hint you provided previously did not seem to have helped. You know the question they are working on, and the step-by-step the concepts they should know to help arrive at an answer. Generate a follow-up question for each of the topics from the breakdown to evaluate the students' understanding of the concepts.
-
-            For example:
-            Rachel: Seems you are struggling to find out how much does light coming in at 20 degrees bend from air to water?
-            Concepts: Physics ->  Ray Optics -> Refraction -> Refractive Index -> Snell's Law 
-
-
-            Conversation:
-            ```{input_text}```
-            Follow-up questions: 
-        """,
-}
-chatgpt_modes = list(chatgpt_prompt_templates.keys())
-problem_state_dict = {k: "" for k in chatgpt_prompt_templates}
-
-
 
 chatgpt_last_response_time = datetime.utcnow()
 chatgpt_response_interval = timedelta(seconds=60)
@@ -83,24 +44,33 @@ chatgpt_response_interval = timedelta(seconds=60)
 #     template=prompt_template, input_variables=["input_text"]
 # )
 OPENAI_KEY = config["OPENAI_KEY"]
-MODEL_NAME = "gpt-3.5-turbo"
-LLM_BIG = ChatOpenAI(model_name=MODEL_NAME,
-                     openai_api_key=OPENAI_KEY, temperature=0.8)
-
-chatgpt_llmchains = {
-    k: LLMChain(llm=LLM_BIG, prompt=PromptTemplate(
-        template=chatgpt_prompt_templates[k], input_variables=["input_text"]
-    ), verbose=True) for k in chatgpt_prompt_templates
-}
-
-def get_response(input_text:str, mode: str = 'question_detection'):
-    if mode in chatgpt_modes:
-        return chatgpt_llmchains[mode].run(input_text=input_text)
-    else:
-        return f"ChatGPT Mode - {mode} undefined"
+MODEL_NAME = "gpt-3.5-turbo-1106"
+Q_NO = 0
+with open("questions.json", "r") as file:
+    question_bank = json.load(file)
+interview_agent = InterviewAssistant(
+    coding_question=question_bank["question_list"][Q_NO],
+    code_solution=question_bank["solution_list"][Q_NO],
+    api_key=OPENAI_KEY,
+)
 
 
-chatgpt_resp_pub_socket = create_socket(ip_address='tcp://*:50001')
+def get_response(
+    current_transcript: str,
+    current_code: str,
+    question: Optional[str] = None,
+    direct_q_flag: bool = False,
+):
+    global interview_agent
+    return interview_agent(
+        current_code=current_code,
+        current_transcript=current_transcript,
+        question=question,
+        direct_question_flg=direct_q_flag,
+    )
+
+
+chatgpt_resp_pub_socket = create_socket(ip_address="tcp://*:50001")
 
 
 # SPEAKER DIARIZATION
@@ -108,7 +78,8 @@ time_starting = datetime.now()
 speaker_history: List[Dict[str, str]] = []
 speaker_last_spoken = {}
 speaker_history_f = open(
-    f"speaker_history_{time_starting.strftime('%m-%d-%Y_%H:%M:%S')}.txt", "w")
+    f"speaker_history_{time_starting.strftime('%m-%d-%Y_%H:%M:%S')}.txt", "w"
+)
 silent_speakers = []
 
 
@@ -119,27 +90,39 @@ FLAG_USER_INVOK_TIME = None
 FLAG_USER_INVOK_TIME_DELTA = timedelta(seconds=5)
 FLAG_SILENCE_DET = False
 
+# Keep Direct Questions
+DIRECT_Q = ""
+
 # TTS Invocaton
 tts_invoked_last = datetime.now() - timedelta(hours=1)
 tts_invoked_waiting_for_new_spk_id = False
+
 
 def get_next_chatgpt_mode(curr_chatgpt_mode: int) -> int:
     global chatgpt_modes
     return (curr_chatgpt_mode + 1) % len(chatgpt_modes)
 
+
 def invoke_chatgpt(override_time_check=False):
     time_now = datetime.utcnow()
-    global chatgpt_currently_invoked, chatgpt_last_response_time, speaker_history, FLAG_SILENCE_DET, FLAG_USER_INVOK, FLAG_USER_INVOK_TIME, FLAG_CV_PRED, curr_chatgpt_mode, chatgpt_modes, asked_if_help_needed, help_needed
+    global chatgpt_currently_invoked, chatgpt_last_response_time, speaker_history, FLAG_SILENCE_DET, FLAG_USER_INVOK, FLAG_USER_INVOK_TIME, FLAG_CV_PRED, asked_if_help_needed, help_needed, DIRECT_Q
     response = ""
     print(f"Function called.")
-    if not override_time_check and (time_now - chatgpt_last_response_time) < chatgpt_response_interval:
-        print(f"Wait for atleast {chatgpt_response_interval - (time_now - chatgpt_last_response_time)} before invoking again.")
+    if (
+        not override_time_check
+        and (time_now - chatgpt_last_response_time) < chatgpt_response_interval
+    ):
+        print(
+            f"Wait for atleast {chatgpt_response_interval - (time_now - chatgpt_last_response_time)} before invoking again."
+        )
         return
     if chatgpt_currently_invoked:
         print(f"One invocation of ChatGPT already running.")
         return
-    
-    FLAG_USER_INVOK_DO = (FLAG_USER_INVOK and (time_now - FLAG_USER_INVOK_TIME > FLAG_USER_INVOK_TIME_DELTA))
+
+    FLAG_USER_INVOK_DO = FLAG_USER_INVOK and (
+        time_now - FLAG_USER_INVOK_TIME > FLAG_USER_INVOK_TIME_DELTA
+    )
 
     if not FLAG_USER_INVOK and not asked_if_help_needed:
         # first ask user if help is needed
@@ -154,37 +137,47 @@ def invoke_chatgpt(override_time_check=False):
             help_needed = True
 
         if help_needed:
-            local_curr_chatgpt_mode = curr_chatgpt_mode if not FLAG_USER_INVOK else 0
-            
-            print(f"Invoking chatgpt, mode = {chatgpt_modes[local_curr_chatgpt_mode]}")
-            utc_time_arrived, ticks_time_arrived = generate_current_dotnet_datetime_ticks()
+            (
+                utc_time_arrived,
+                ticks_time_arrived,
+            ) = generate_current_dotnet_datetime_ticks()
             chatgpt_last_response_time = utc_time_arrived
             chatgpt_currently_invoked = True
 
-
             conversation_string = ""
             for utterance in speaker_history:
-                conversation_string += f"{utterance['speaker_id']}: {utterance['text']}\n"
-            response = get_response(input_text=conversation_string, mode=chatgpt_modes[local_curr_chatgpt_mode])
-            if not FLAG_USER_INVOK:
-                problem_state_dict[chatgpt_modes[curr_chatgpt_mode]] = response
-            else:
-                problem_state_dict["direct_user_invok"] = response
-            print(f"""
-                Curr chatgpt mode: {chatgpt_modes[local_curr_chatgpt_mode]}\n
-                Curr problem state dict: {problem_state_dict}
+                conversation_string += (
+                    f"{utterance['speaker_id']}: {utterance['text']}\n"
+                )
+            # TODO: Current Code
+            current_code = ""
 
-                Next chatgpt mode: {chatgpt_modes[get_next_chatgpt_mode(curr_chatgpt_mode)]}
-            """)
             if not FLAG_USER_INVOK:
-                curr_chatgpt_mode = get_next_chatgpt_mode(curr_chatgpt_mode) # will cycle through chatgpt modes
-            speaker_history.append({
-                "speaker_id": "Rachel", "text": response, "duration": None, "utc_time_arrived": utc_time_arrived, "ticks_time_arrived": ticks_time_arrived
-            })
+                response = get_response(
+                    current_transcript=conversation_string,
+                    current_code=current_code,
+                )
+            else:
+                response = get_response(
+                    current_transcript=conversation_string,
+                    current_code=current_code,
+                    direct_q_flag=True,
+                    question=DIRECT_Q,
+                )
+
+            speaker_history.append(
+                {
+                    "speaker_id": "Rachel",
+                    "text": response,
+                    "duration": None,
+                    "utc_time_arrived": utc_time_arrived,
+                    "ticks_time_arrived": ticks_time_arrived,
+                }
+            )
             chatgpt_currently_invoked = False
         else:
             response = ""
-        
+
         FLAG_CV_PRED = False
         if FLAG_USER_INVOK_DO:
             FLAG_USER_INVOK = False
@@ -195,34 +188,38 @@ def invoke_chatgpt(override_time_check=False):
     if len(response) > 0:
         send_payload(chatgpt_resp_pub_socket, "chatgpt-responses", response)
         print(f"Chatgpt: {response}")
-    print(f"."*100)
+    print(f"." * 100)
 
 
 def conversation_transcriber_recognition_canceled_cb(evt: speechsdk.SessionEventArgs):
-    print('Canceled event')
+    print("Canceled event")
 
 
 def conversation_transcriber_session_stopped_cb(evt: speechsdk.SessionEventArgs):
-    print('SessionStopped event')
+    print("SessionStopped event")
 
 
 def generate_current_dotnet_datetime_ticks(base_time=datetime(1, 1, 1)):
     x = datetime.utcnow()
-    return x, (x - base_time)/timedelta(microseconds=1) * 1e1
+    return x, (x - base_time) / timedelta(microseconds=1) * 1e1
 
 
 def conversation_transcriber_transcribed_cb(evt: speechsdk.SpeechRecognitionEventArgs):
     global tts_invoked_waiting_for_new_spk_id, FLAG_USER_INVOK
-    print('TRANSCRIBED:')
+    print("TRANSCRIBED:")
     if evt.result.reason == speechsdk.ResultReason.RecognizedSpeech:
         text = evt.result.text
         speaker_id = evt.result.speaker_id
         duration = evt.result.duration
         utc_time_arrived, ticks_time_arrived = generate_current_dotnet_datetime_ticks()
-        print('\tText={}'.format(text))
-        print('\tSpeaker ID={}'.format(speaker_id))
+        print("\tText={}".format(text))
+        print("\tSpeaker ID={}".format(speaker_id))
         temp = {
-            "speaker_id": speaker_id, "text": text, "duration": duration, "utc_time_arrived": utc_time_arrived, "ticks_time_arrived": ticks_time_arrived
+            "speaker_id": speaker_id,
+            "text": text,
+            "duration": duration,
+            "utc_time_arrived": utc_time_arrived,
+            "ticks_time_arrived": ticks_time_arrived,
         }
 
         if speaker_id == "Guest-1":
@@ -243,20 +240,25 @@ def conversation_transcriber_transcribed_cb(evt: speechsdk.SpeechRecognitionEven
         print(speaker_history[-3:])
         speaker_history.append(temp)
         speaker_history_f.write(
-            f"{speaker_id}|{text}|{duration}|{utc_time_arrived}|{ticks_time_arrived}\n")
+            f"{speaker_id}|{text}|{duration}|{utc_time_arrived}|{ticks_time_arrived}\n"
+        )
         speaker_history_f.flush()
-        if user_invocation_string in re.sub(r'[^\w\s]', '', text.lower()):
+        if user_invocation_string in re.sub(r"[^\w\s]", "", text.lower()):
             global FLAG_USER_INVOK, FLAG_USER_INVOK_TIME
             FLAG_USER_INVOK = True
             FLAG_USER_INVOK_TIME = datetime.utcnow()
             print(f"Rachel invoked", FLAG_USER_INVOK, FLAG_USER_INVOK_TIME)
+            # TODO: Extract direct question here
     elif evt.result.reason == speechsdk.ResultReason.NoMatch:
-        print('\tNOMATCH: Speech could not be TRANSCRIBED: {}'.format(
-            evt.result.no_match_details))
+        print(
+            "\tNOMATCH: Speech could not be TRANSCRIBED: {}".format(
+                evt.result.no_match_details
+            )
+        )
 
 
 def conversation_transcriber_session_started_cb(evt: speechsdk.SessionEventArgs):
-    print('SessionStarted event')
+    print("SessionStarted event")
 
 
 def diarize_from_stream(topic: str, psi_port: int):
@@ -265,10 +267,10 @@ def diarize_from_stream(topic: str, psi_port: int):
     AzureSubscriptionKey = "165ea78f5c7f44bd9d31f07d0f319cc7"
     AzureRegion = "eastus"
     speech_config = speechsdk.SpeechConfig(
-        subscription=AzureSubscriptionKey, region=AzureRegion)
+        subscription=AzureSubscriptionKey, region=AzureRegion
+    )
     # This example requires environment variables named "SPEECH_KEY" and "SPEECH_REGION"
-    speech_config.set_property(
-        speechsdk.PropertyId.Speech_LogFilename, "./out.log")
+    speech_config.set_property(speechsdk.PropertyId.Speech_LogFilename, "./out.log")
     speech_config.speech_recognition_language = "en-US"
 
     # setup the audio stream
@@ -276,38 +278,45 @@ def diarize_from_stream(topic: str, psi_port: int):
     audio_config = speechsdk.audio.AudioConfig(stream=stream)
     # audio_config = speechsdk.audio.AudioConfig(stream=None)
     conversation_transcriber = speechsdk.transcription.ConversationTranscriber(
-        speech_config=speech_config, audio_config=audio_config)
+        speech_config=speech_config, audio_config=audio_config
+    )
     recognition_done = threading.Event()
 
     transcribing_stop = False
 
     def stop_cb(evt: speechsdk.SessionEventArgs):
         # """callback that signals to stop continuous recognition upon receiving an event `evt`"""
-        print('CLOSING on {}'.format(evt))
+        print("CLOSING on {}".format(evt))
         nonlocal transcribing_stop
         transcribing_stop = True
         recognition_done.set()
 
     # Connect callbacks to the events fired by the conversation transcriber
     conversation_transcriber.transcribed.connect(
-        conversation_transcriber_transcribed_cb)
+        conversation_transcriber_transcribed_cb
+    )
     conversation_transcriber.session_started.connect(
-        conversation_transcriber_session_started_cb)
+        conversation_transcriber_session_started_cb
+    )
     conversation_transcriber.session_stopped.connect(
-        conversation_transcriber_session_stopped_cb)
+        conversation_transcriber_session_stopped_cb
+    )
     conversation_transcriber.canceled.connect(
-        conversation_transcriber_recognition_canceled_cb)
+        conversation_transcriber_recognition_canceled_cb
+    )
     # stop transcribing on either session stopped or canceled events
     conversation_transcriber.session_stopped.connect(stop_cb)
     conversation_transcriber.canceled.connect(stop_cb)
 
     # start push stream writer thread
     push_stream_writer_thread = threading.Thread(
-        target=push_stream_writer, args=[stream, topic, psi_port])
+        target=push_stream_writer, args=[stream, topic, psi_port]
+    )
     push_stream_writer_thread.start()
 
     check_every_second_for_silent_thread = threading.Thread(
-        target=check_every_second_for_silent)
+        target=check_every_second_for_silent
+    )
     check_every_second_for_silent_thread.start()
 
     # start continuous speech recognition
@@ -336,7 +345,7 @@ def check_every_second_for_silent(delta_silence=timedelta(seconds=20)):
         silent_speakers = []
         time_now = datetime.utcnow()
         for speaker, last_time_spoken in speaker_last_spoken.items():
-            delta = (time_now - last_time_spoken)
+            delta = time_now - last_time_spoken
             print(delta, delta_silence, delta > delta_silence)
             if delta > delta_silence:
                 silent_speakers.append(speaker)
@@ -350,8 +359,7 @@ def check_every_second_for_silent(delta_silence=timedelta(seconds=20)):
 def push_stream_writer(stream, topic: str, psi_port=40003):
     # The number of bytes to push per buffer
     # n_bytes = 3200
-    sub_socket_to_psi = create_sub_socket(
-        ip_address=f"tcp://localhost:{psi_port}")
+    sub_socket_to_psi = create_sub_socket(ip_address=f"tcp://localhost:{psi_port}")
     sub_socket_to_psi.setsockopt_string(zmq.SUBSCRIBE, topic)
 
     # start pushing data until all data has been read from the file
@@ -386,8 +394,7 @@ def monitor_flags_and_invoke_chatgpt():
 
 
 def receive_cv_preds_from_psi(topic: str, psi_port=40003):
-    sub_socket_to_psi = create_sub_socket(
-        ip_address=f"tcp://localhost:{psi_port}")
+    sub_socket_to_psi = create_sub_socket(ip_address=f"tcp://localhost:{psi_port}")
     sub_socket_to_psi.setsockopt_string(zmq.SUBSCRIBE, topic)
     confused_column = 3
     confusion_threshold = 0.85
@@ -410,8 +417,7 @@ def receive_cv_preds_from_psi(topic: str, psi_port=40003):
 
 
 def receive_tts_inv_from_psi(topic: str, psi_port=40006):
-    sub_socket_to_psi = create_sub_socket(
-        ip_address=f"tcp://localhost:{psi_port}")
+    sub_socket_to_psi = create_sub_socket(ip_address=f"tcp://localhost:{psi_port}")
     sub_socket_to_psi.setsockopt_string(zmq.SUBSCRIBE, topic)
     global tts_invoked_last, tts_invoked_waiting_for_new_spk_id
     try:
@@ -419,7 +425,7 @@ def receive_tts_inv_from_psi(topic: str, psi_port=40006):
             print(f"waiting from fe/python")
             frames, originatingTime = readFrame(sub_socket_to_psi)
             if topic == "tts-inv-psi-to-python":
-                tts_invoked = json.loads(frames)['tts_invoked']
+                tts_invoked = json.loads(frames)["tts_invoked"]
                 print(f"received from fe", frames, tts_invoked)
                 if tts_invoked:
                     tts_invoked_last = convert_ticks_to_timestamp(originatingTime)
@@ -427,9 +433,9 @@ def receive_tts_inv_from_psi(topic: str, psi_port=40006):
     finally:
         sub_socket_to_psi.close()
 
+
 def receive_code_from_psi(topic: str, psi_port=40006):
-    sub_socket_to_psi = create_sub_socket(
-        ip_address=f"tcp://localhost:{psi_port}")
+    sub_socket_to_psi = create_sub_socket(ip_address=f"tcp://localhost:{psi_port}")
     sub_socket_to_psi.setsockopt_string(zmq.SUBSCRIBE, topic)
     # global tts_invoked_last, tts_invoked_waiting_for_new_spk_id
     try:
@@ -442,11 +448,10 @@ def receive_code_from_psi(topic: str, psi_port=40006):
 
 
 def receive_audio_from_psi(topic: str, psi_port=40003):
-    sub_socket_to_psi = create_sub_socket(
-        ip_address=f"tcp://localhost:{psi_port}")
+    sub_socket_to_psi = create_sub_socket(ip_address=f"tcp://localhost:{psi_port}")
     sub_socket_to_psi.setsockopt_string(zmq.SUBSCRIBE, topic)
     try:
-        with wave.open('myfile.wav', mode='wb') as f:
+        with wave.open("myfile.wav", mode="wb") as f:
             f.setnchannels(1)
             f.setsampwidth(2)
             f.setframerate(16000)
@@ -458,7 +463,7 @@ def receive_audio_from_psi(topic: str, psi_port=40003):
                 # topic, frames = message.split()
                 # frames = wav_fh.readframes(n_bytes // 2)
                 f.writeframes(frames)
-                print('read {} bytes {}'.format(len(frames), originatingTime))
+                print("read {} bytes {}".format(len(frames), originatingTime))
                 if not frames:
                     break
                 # time.sleep(.1)
@@ -470,19 +475,23 @@ def receive_audio_from_psi(topic: str, psi_port=40003):
 if __name__ == "__main__":
     try:
         receive_cv_preds_thread = threading.Thread(
-            target=receive_cv_preds_from_psi, args=["cv-preds-psi-to-python", 40005])
+            target=receive_cv_preds_from_psi, args=["cv-preds-psi-to-python", 40005]
+        )
         receive_cv_preds_thread.start()
 
         receive_tts_inv_thread = threading.Thread(
-            target=receive_tts_inv_from_psi, args=["tts-inv-psi-to-python", 40006])
+            target=receive_tts_inv_from_psi, args=["tts-inv-psi-to-python", 40006]
+        )
         receive_tts_inv_thread.start()
 
         receive_code_thread = threading.Thread(
-            target=receive_code_from_psi, args=["fe-code-psi-to-python", 40007])
+            target=receive_code_from_psi, args=["fe-code-psi-to-python", 40007]
+        )
         receive_code_thread.start()
 
         check_flags_and_invoke_thread = threading.Thread(
-            target=monitor_flags_and_invoke_chatgpt)
+            target=monitor_flags_and_invoke_chatgpt
+        )
         check_flags_and_invoke_thread.start()
 
         diarize_from_stream(topic=f"audio-psi-to-python", psi_port=40003)
@@ -492,7 +501,7 @@ if __name__ == "__main__":
         receive_tts_inv_thread.join()
         receive_code_thread.join()
         check_flags_and_invoke_thread.join()
-        
+
         # send_video_dict_with_embed.main()
     except Exception as err:
         print("Encountered exception. {}".format(err))
