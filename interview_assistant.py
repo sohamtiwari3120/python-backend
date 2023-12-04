@@ -60,7 +60,7 @@ class InterviewAssistant:
                 openai_api_key=self.api_key)
             index = get_retrieval_index(retrieval_idx)
             vectorstore = Pinecone(
-                self.index, self.embed.embed_query, "text"
+                index, self.embed.embed_query, "text"
             )
             self.retriever = vectorstore.as_retriever(search_kwargs={"k": 1})
 
@@ -109,7 +109,7 @@ class InterviewAssistant:
             instruction = bug_instruct_ctx
         else:
             instruction = generic_instruct_ctx
-        print(f"Instruction Used: {instruction} ")
+
         return self.generate_chat_response(
             instruction,
             coding_question=self.coding_q,
@@ -170,6 +170,7 @@ class InterviewAssistant:
             retrieved_docs = self.retriever.invoke(question)
             retrieved_ctx = retrieved_docs[0].page_content
             user_prompt += f"\nContext: {retrieved_ctx}"
+            # print(f"Retrieved Context: {retrieved_ctx}")
             instruct = direct_q_retrieval
         user_prompt  += f"\nStudent Question: {question}"
 

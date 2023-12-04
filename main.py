@@ -116,6 +116,11 @@ tts_invoked_waiting_for_new_spk_id = False
 def add_and_send_rachel_response(response: str, utc_time_arrived, ticks_time_arrived) -> None:
     global speaker_history
     if len(response) > 0:
+        # response = json.dumps(response)
+        response = response.replace('\n', '\\n')
+        response = response.replace('\"', '\\"')
+
+        assert type(response) == str
         speaker_history.append(
                 {
                     "speaker_id": "Rachel",
@@ -125,6 +130,7 @@ def add_and_send_rachel_response(response: str, utc_time_arrived, ticks_time_arr
                     "ticks_time_arrived": ticks_time_arrived,
                 }
             )
+        
         send_payload(chatgpt_resp_pub_socket, "chatgpt-responses", response)
         print(f"Chatgpt: {response}")
         print(f"." * 100)
@@ -182,10 +188,12 @@ def invoke_chatgpt():
                     current_code=user_code,
                 )
             else:
-
                 DIRECT_Q = " ".join([speaker_history[i]['text'] for i in speaker_last_spoken[PERSON_WHO_USER_INVOK]['list_utt_ind'][-2:]])
-                ind = DIRECT_Q.lower().index(user_invocation_string)
-                DIRECT_Q = DIRECT_Q[ind:]
+                try:
+                    ind = DIRECT_Q.lower().rindex(user_invocation_string)
+                    DIRECT_Q = DIRECT_Q[ind:]
+                except:
+                    print(f"ERROR: user invocation string not present in current context window.")
                 print(f"Direct Question: {DIRECT_Q}")
                 response = get_response(
                     current_transcript=conversation_string,
