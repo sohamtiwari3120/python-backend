@@ -21,7 +21,7 @@ class InterviewAssistant:
         coding_question: str,
         code_solution: str,
         api_key: str,
-        initial_mode: str = "introduction",
+        initial_mode: str = "conceptual",
         mode_switching: str = "heuristic",
         heuristic_switchover=None,
         max_token_args=None,
@@ -87,13 +87,11 @@ class InterviewAssistant:
             self.mode = self.determine_mode(current_code, current_transcript)
         if self.mode == "conceptual":
             instruction = concept_instruct_ctx
-        elif self.mode == "introduction":
-            instruction = intro
         elif self.mode == "fine-grained":
             instruction = bug_instruct_ctx
         else:
             instruction = generic_instruct_ctx
-
+        print(f"Instruction Used: {instruction} ")
         return self.generate_chat_response(
             instruction,
             coding_question=self.coding_q,
