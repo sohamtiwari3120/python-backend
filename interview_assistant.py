@@ -3,6 +3,7 @@ from typing import Optional
 import json
 from dotenv import dotenv_values
 from langchain.schema.messages import HumanMessage, SystemMessage, AIMessage
+from langchain.embeddings.openai import OpenAIEmbeddings
 from langchain.schema.runnable import ConfigurableField
 from langchain.chat_models import ChatOpenAI
 from instructions import (
@@ -11,8 +12,11 @@ from instructions import (
     mode_instruct_ctx,
     concept_instruct_ctx,
     direct_q,
+    direct_q_retrieval,
     intro,
 )
+from general_utils import get_retrieval_index
+from langchain.vectorstores import Pinecone
 
 
 class InterviewAssistant:
@@ -23,8 +27,10 @@ class InterviewAssistant:
         api_key: str,
         initial_mode: str = "introduction",
         mode_switching: str = "heuristic",
+        include_retrieved_ctx: bool = True,
         heuristic_switchover=None,
         max_token_args=None,
+        retrieval_idx: str = "capstone-langchain-retrieval-augmentation2"
     ):
         self.api_key = api_key
         self.mode = initial_mode
@@ -46,6 +52,18 @@ class InterviewAssistant:
                 description="Maximum Tokens to output",
             )
         )
+        self.include_retrieved_ctx = include_retrieved_ctx
+        if self.include_retrieved_ctx: 
+            embed_model_name = 'text-embedding-ada-002'
+            self.embed = OpenAIEmbeddings(
+                model=embed_model_name,
+                openai_api_key=self.api_key)
+            index = get_retrieval_index(retrieval_idx)
+            vectorstore = Pinecone(
+                self.index, self.embed.embed_query, "text"
+            )
+            self.retriever = vectorstore.as_retriever(search_kwargs={"k": 1})
+
         if heuristic_switchover is None:
             self.heuristic_switchover = 3
         else:
@@ -148,8 +166,16 @@ class InterviewAssistant:
     def direct_question_response(self, code, transcript, question) -> str:
         # Construct user prompt
         user_prompt = f"Question: {self.coding_q}\nCurrent Code: {code}\nCurrent Transcript: {transcript}"
-        user_prompt += f"\nSolution: {self.solution}\nStudent Question: {question}"
-        messages = [SystemMessage(content=direct_q), HumanMessage(content=user_prompt)]
+        user_prompt += f"\nSolution: {self.solution}"
+        instruct = direct_q
+        if self.include_retrieved_ctx:
+            retrieved_docs = self.retriever.invoke(question)
+            retrieved_ctx = retrieved_docs[0].page_content
+            user_prompt += f"\nContext: {retrieved_ctx}"
+            instruct = direct_q_retrieval
+        user_prompt  += f"\nStudent Question: {question}"
+
+        messages = [SystemMessage(content=instruct), HumanMessage(content=user_prompt)]
         ai_response = self.chat.with_config(
             configurable={
                 "max_tokens": self.max_token_args["direct_question_response_max"]
