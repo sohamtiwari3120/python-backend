@@ -65,7 +65,7 @@ class InterviewAssistant:
             self.retriever = vectorstore.as_retriever(search_kwargs={"k": 1})
 
         if heuristic_switchover is None:
-            self.heuristic_switchover = 3
+            self.heuristic_switchover = 1
         else:
             self.heuristic_switchover = heuristic_switchover
         if (
@@ -129,7 +129,7 @@ class InterviewAssistant:
         max_tokens: int = 250,
     ):
         # Construct user prompt
-        user_prompt = f"Question: {coding_question}\nCurrent Code: {code_snippet}\nCurrent Transcript: {interview_transcript}"
+        user_prompt = f"Question: {coding_question}\nStudent Code: {code_snippet}\nCurrent Transcript: {interview_transcript}"
         if solution:
             user_prompt += f"\nSolution: {solution}"
         messages = [
@@ -156,14 +156,14 @@ class InterviewAssistant:
                 solution=self.solution,
                 max_tokens=250,
             )
-            if "yes" in llm_response.lower():
+            if "yes" in llm_response.lower() or not code:
                 return "conceptual"
             else:
                 return "fine-grained"
 
     def direct_question_response(self, code, transcript, question) -> str:
         # Construct user prompt
-        user_prompt = f"Question: {self.coding_q}\nCurrent Code: {code}\nCurrent Transcript: {transcript}"
+        user_prompt = f"Question: {self.coding_q}\nStudent Code: {code}\nCurrent Transcript: {transcript}"
         user_prompt += f"\nSolution: {self.solution}"
         instruct = direct_q
         if self.include_retrieved_ctx:

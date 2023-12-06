@@ -429,20 +429,38 @@ def receive_cv_preds_from_psi(topic: str, psi_port=40003):
 def receive_tts_inv_from_psi(topic: str, psi_port=40006):
     sub_socket_to_psi = create_sub_socket(ip_address=f"tcp://localhost:{psi_port}")
     sub_socket_to_psi.setsockopt_string(zmq.SUBSCRIBE, topic)
-    global tts_invoked_last, tts_invoked_waiting_for_new_spk_id
+    global tts_invoked_last, tts_invoked_waiting_for_new_spk_id, chatgpt_resp_pub_socket
+    ctr = 0
     try:
         while True:
             print(f"waiting from fe/python")
             frames, originatingTime = readFrame(sub_socket_to_psi)
-            if topic == "tts-inv-psi-to-python":
-                tts_invoked = json.loads(frames)["tts_invoked"]
-                print(f"received from fe", frames, tts_invoked)
-                if tts_invoked:
-                    tts_invoked_last = convert_ticks_to_timestamp(originatingTime)
-                    tts_invoked_waiting_for_new_spk_id = True
+            ctr += 1
+            tts_invoked = json.loads(frames)["tts_invoked"]
+            print(f"received from fe", frames, tts_invoked)
+            if tts_invoked:
+                tts_invoked_last = convert_ticks_to_timestamp(originatingTime)
+                tts_invoked_waiting_for_new_spk_id = True
+            else:
+                question = question_bank['question_list'][Q_NO].replace('\n', '\\n').replace('\"', '\\"')
+                question = f"Question: {question}"
+                send_payload(chatgpt_resp_pub_socket, "chatgpt-responses", question)
     finally:
         sub_socket_to_psi.close()
 
+
+def send_question_to_psi(topic: str, psi_port=40006):
+    sub_socket_to_psi = create_sub_socket(ip_address=f"tcp://localhost:{psi_port}")
+    sub_socket_to_psi.setsockopt_string(zmq.SUBSCRIBE, topic)
+    # global tts_invoked_last, tts_invoked_waiting_for_new_spk_id
+    global user_code
+    try:
+        while True:
+            print(f"waiting for code from fe/python")
+            user_code, originatingTime = readFrame(sub_socket_to_psi)
+            print(f"received code from fe", user_code)
+    finally:
+        sub_socket_to_psi.close()
 
 def receive_code_from_psi(topic: str, psi_port=40006):
     sub_socket_to_psi = create_sub_socket(ip_address=f"tcp://localhost:{psi_port}")
@@ -505,6 +523,8 @@ class Application:
         """Start all the parallel threads
         """        
         try:
+            # send selected question
+            # time.sleep(20)
             receive_cv_preds_thread = threading.Thread(
                 target=receive_cv_preds_from_psi, args=["cv-preds-psi-to-python", 40005]
             )
