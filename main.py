@@ -54,7 +54,7 @@ num_transcripts_to_wait_whether_help_needed = 3
 
 
 chatgpt_last_response_time = datetime.utcnow()
-chatgpt_response_interval = timedelta(seconds=20)
+chatgpt_response_interval = timedelta(seconds=60)
 
 OPENAI_KEY = config["OPENAI_KEY"]
 MODEL_NAME = "gpt-3.5-turbo-1106"
@@ -420,8 +420,8 @@ def receive_cv_preds_from_psi(topic: str, psi_port=40003):
             global FLAG_CV_PRED
             if len(speaker_last_spoken) > 0:
                 FLAG_CV_PRED = emotions[0] != 0
-            # if FLAG_CV_PRED:
-            #     print(f"FLAG_CV_PRED", FLAG_CV_PRED, emotions)
+                if FLAG_CV_PRED:
+                    print(f"USER(S) CONFUSED")
     finally:
         sub_socket_to_psi.close()
 
@@ -444,6 +444,7 @@ def receive_tts_inv_from_psi(topic: str, psi_port=40006):
             else:
                 question = question_bank['question_list'][Q_NO].replace('\n', '\\n').replace('\"', '\\"')
                 question = f"Question: {question}"
+                print(f"Sending question: {question}, ctr={ctr}")
                 send_payload(chatgpt_resp_pub_socket, "chatgpt-responses", question)
     finally:
         sub_socket_to_psi.close()

@@ -10,7 +10,9 @@ from instructions import (
     generic_instruct_ctx,
     bug_instruct_ctx,
     mode_instruct_ctx,
+    concept_instruct_w_code,
     concept_instruct_ctx,
+    concept_instruct,
     direct_q,
     direct_q_retrieval,
     intro,
@@ -65,7 +67,7 @@ class InterviewAssistant:
             self.retriever = vectorstore.as_retriever(search_kwargs={"k": 1})
 
         if heuristic_switchover is None:
-            self.heuristic_switchover = 1
+            self.heuristic_switchover = 2
         else:
             self.heuristic_switchover = heuristic_switchover
         if (
@@ -104,12 +106,14 @@ class InterviewAssistant:
         if self.mode != "generic":
             self.mode = self.determine_mode(current_code, current_transcript)
         if self.mode == "conceptual":
-            instruction = concept_instruct_ctx
+            instruction = concept_instruct
+            if current_code: 
+                instruction = concept_instruct_w_code
         elif self.mode == "fine-grained":
             instruction = bug_instruct_ctx
         else:
             instruction = generic_instruct_ctx
-
+        print(instruction)
         return self.generate_chat_response(
             instruction,
             coding_question=self.coding_q,
@@ -129,8 +133,10 @@ class InterviewAssistant:
         max_tokens: int = 250,
     ):
         # Construct user prompt
-        user_prompt = f"Question: {coding_question}\nStudent Code: {code_snippet}\nCurrent Transcript: {interview_transcript}"
-        if solution:
+        user_prompt = f"Question: {coding_question}\nCurrent Transcript: {interview_transcript}"
+        if code_snippet:
+            user_prompt += f"\nStudent Code: {code_snippet}"
+        if solution and self.mode == "fine-grained":
             user_prompt += f"\nSolution: {solution}"
         messages = [
             SystemMessage(content=sys_instruction),
@@ -143,7 +149,7 @@ class InterviewAssistant:
 
     def determine_mode(self, code, transcript):
         if self.mode_switching == "heuristic":
-            if self.num_invocations < self.heuristic_switchover:
+            if self.num_invocations < self.heuristic_switchover or not code:
                 return "conceptual"
             else:
                 return "fine-grained"
@@ -156,6 +162,7 @@ class InterviewAssistant:
                 solution=self.solution,
                 max_tokens=250,
             )
+    
             if "yes" in llm_response.lower() or not code:
                 return "conceptual"
             else:
