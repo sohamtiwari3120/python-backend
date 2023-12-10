@@ -1,4 +1,5 @@
 import argparse
+from dotenv import dotenv_values
 from typing import Optional
 import json
 from dotenv import dotenv_values
@@ -9,6 +10,7 @@ from langchain.chat_models import ChatOpenAI
 from instructions import (
     generic_instruct_ctx,
     bug_instruct_ctx,
+    bug_instruct_cot,
     mode_instruct_ctx,
     concept_instruct_w_code,
     concept_instruct_ctx,
@@ -32,7 +34,9 @@ class InterviewAssistant:
         include_retrieved_ctx: bool = True,
         heuristic_switchover=None,
         max_token_args=None,
-        retrieval_idx: str = "capstone-langchain-retrieval-augmentation2"
+        retrieval_idx: str = "capstone-langchain-retrieval-augmentation2",
+        in_context_examples: int = 2,
+        cot: bool = False
     ):
         self.api_key = api_key
         self.mode = initial_mode
@@ -78,6 +82,8 @@ class InterviewAssistant:
             self.max_token_args = {"hint_max": 250, "direct_question_response_max": 500}
         else:
             self.max_token_args = max_token_args
+        self.in_context_examples = in_context_examples
+        self.cot = cot
         # Stop words
         self.stop_words = [
             "Question:",
@@ -91,7 +97,8 @@ class InterviewAssistant:
         current_code: str,
         current_transcript: str,
         question: Optional[str] = None,
-        direct_question_flg: str = False,
+        direct_question_flg: bool = False,
+        in_context: bool = False
     ):
         if direct_question_flg:
             if question is None:
@@ -110,10 +117,16 @@ class InterviewAssistant:
             if current_code: 
                 instruction = concept_instruct_w_code
         elif self.mode == "fine-grained":
-            instruction = bug_instruct_ctx
+            if in_context: 
+                instruction = self.in_context_prompt()
+            else: 
+                if self.cot: 
+                    instruction = bug_instruct_cot
+                else: 
+                    instruction = bug_instruct_ctx
         else:
             instruction = generic_instruct_ctx
-        print(instruction)
+        # print(f"Instruction: {instruction}")
         return self.generate_chat_response(
             instruction,
             coding_question=self.coding_q,
@@ -188,6 +201,29 @@ class InterviewAssistant:
             }
         ).invoke(messages, stop=self.stop_words)
         return ai_response.content
+    
+    def in_context_prompt(self):
+        instruction = ""
+        if self.cot: 
+            example_file = 'train_cot'
+            instruction = bug_instruct_cot
+        else: 
+            example_file = 'train'
+            instruction = bug_instruct_ctx
+        examples_added = 0
+        with open(f"{example_file}.jsonl", "r") as f:
+            for example in f:
+                if examples_added == self.in_context_examples: 
+                    break
+                current_example = json.loads(example)
+                messages = current_example["messages"]
+                instruction += messages[1]["content"]
+                instruction += "\n Assistant: "
+                instruction += messages[2]["content"]
+                instruction += "\n"
+                examples_added += 1
+        return instruction
+        
 
     def check_hint(self, hint, true_ans) -> bool:
         raise NotImplementedError
@@ -213,3 +249,42 @@ class InterviewAssistant:
 
     def get_current_mode(self):
         return self.mode
+
+if __name__ == "__main__":
+    all_user_prompts = []
+    cot = False
+    if cot: 
+        example_file = 'train_cot'  
+    else: 
+        example_file = 'train'
+
+    with open(f"{example_file}.jsonl", "r") as f:
+        for example in f:
+            current_ex = json.loads(example)
+            messages = current_ex["messages"]
+            all_user_prompts.append(messages[1]["content"])
+    chosen_example_idx = 3
+    example = all_user_prompts[chosen_example_idx]
+
+    transcript_start_idx = example.find("Current Transcript:")
+    student_code_start_idx = example.find("Student Code:")
+    solution_start_idx = example.find("Solution:")
+
+    question = example[10:transcript_start_idx]
+    solution = example[solution_start_idx+10:]
+    transcript = example[transcript_start_idx+19:student_code_start_idx]
+    student_code = example[student_code_start_idx+14:solution_start_idx]
+
+    config = dotenv_values(".env")
+    OPENAI_KEY = config["OPENAI_KEY"]
+    interview_agent = InterviewAssistant(
+        coding_question=question,
+        code_solution=solution,
+        api_key=OPENAI_KEY,
+        initial_mode="fine-grained",
+        heuristic_switchover=0
+    )
+    print(f"Question: {question}")
+    print(f"Response: {interview_agent(student_code, transcript)}")
+    print(f"Response w/ ICT: {interview_agent(student_code, transcript, in_context=True)}")
+
