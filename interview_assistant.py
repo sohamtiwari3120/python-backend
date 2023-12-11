@@ -35,7 +35,7 @@ class InterviewAssistant:
         heuristic_switchover=None,
         max_token_args=None,
         retrieval_idx: str = "capstone-langchain-retrieval-augmentation2",
-        in_context_examples: int = 2,
+        in_context_examples: int = 3,
         cot: bool = False
     ):
         self.api_key = api_key
@@ -112,6 +112,7 @@ class InterviewAssistant:
         # Elicit either a conceptual, high-level hint or a fine-grained hint
         if self.mode != "generic":
             self.mode = self.determine_mode(current_code, current_transcript)
+            print(f"Current Mode: {self.mode}")
         if self.mode == "conceptual":
             instruction = concept_instruct
             if current_code: 
@@ -158,7 +159,11 @@ class InterviewAssistant:
         ai_response = self.chat.with_config(
             configurable={"max_tokens": max_tokens}
         ).invoke(messages, stop=self.stop_words)
-        return ai_response.content
+        response = ai_response.content
+        if self.cot: 
+            hint_start = response.find("Hint:")
+            response = response[hint_start + 6:]
+        return response
 
     def determine_mode(self, code, transcript):
         if self.mode_switching == "heuristic":
@@ -263,7 +268,7 @@ if __name__ == "__main__":
             current_ex = json.loads(example)
             messages = current_ex["messages"]
             all_user_prompts.append(messages[1]["content"])
-    chosen_example_idx = 3
+    chosen_example_idx = 5
     example = all_user_prompts[chosen_example_idx]
 
     transcript_start_idx = example.find("Current Transcript:")
@@ -282,7 +287,8 @@ if __name__ == "__main__":
         code_solution=solution,
         api_key=OPENAI_KEY,
         initial_mode="fine-grained",
-        heuristic_switchover=0
+        mode_switching="model",
+        cot=True
     )
     print(f"Question: {question}")
     print(f"Response: {interview_agent(student_code, transcript)}")
